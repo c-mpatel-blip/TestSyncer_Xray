@@ -1,0 +1,9 @@
+node_modules/
+.env
+logs/
+learning-data/*.json
+!learning-data/.gitkeep
+cache/
+*.log
+.DS_Store
+Thumbs.db

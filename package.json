@@ -1,0 +1,32 @@
+{
+  "name": "jira-testrail-integration",
+  "version": "1.0.0",
+  "description": "AI-powered JIRA-TestRail integration service with automatic test case matching and learning",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon --ignore logs/ --ignore learning-data/ server.js",
+    "test": "node test-connections.js",
+    "test-connections": "node test-connections.js"
+  },
+  "keywords": [
+    "jira",
+    "testrail",
+    "openai",
+    "automation",
+    "508c",
+    "accessibility"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "winston": "^3.11.0",
+    "openai": "^4.20.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
