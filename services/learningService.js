@@ -98,7 +98,7 @@ class LearningService {
   }
 
   /**
-   * Find similar match in learning data
+   * Find similar match in learning data (single match mode)
    * @param {Object} bugData - Bug information
    * @returns {Promise<Object|null>} Similar match or null
    */
@@ -137,6 +137,89 @@ class LearningService {
     } catch (error) {
       logger.error(`Failed to find similar match: ${error.message}`);
       return null;
+    }
+  }
+
+  /**
+   * Find similar matches in learning data (multi-match mode)
+   * Returns all test cases from similar bugs
+   * @param {Object} bugData - Bug information
+   * @returns {Promise<Array>} Array of similar matches
+   */
+  async findSimilarMatches(bugData) {
+    try {
+      await this.initialize();
+      const corrections = await this.loadCorrections();
+      const matches = await this.loadMatches();
+      
+      if (corrections.length === 0 && matches.length === 0) {
+        return [];
+      }
+
+      // Extract keywords from bug
+      const bugKeywords = this.extractKeywords(bugData.summary + ' ' + (bugData.description || ''));
+
+      const similarMatches = [];
+      const seenTestIds = new Set();
+
+      // Check corrections first (most reliable)
+      for (const correction of corrections.reverse()) { // Most recent first
+        const correctionKeywords = this.extractKeywords(
+          correction.bug.summary + ' ' + (correction.bug.description || '')
+        );
+
+        const matchScore = this.calculateKeywordMatch(bugKeywords, correctionKeywords);
+        
+        if (matchScore > 0.5) { // 50% threshold for multi-match (more lenient)
+          const testId = correction.correct_test_id;
+          if (!seenTestIds.has(testId)) {
+            similarMatches.push({
+              test_id: testId,
+              case_id: correction.correct_case_id,
+              title: correction.correct_title,
+              confidence: 0.85 + (matchScore * 0.15),
+              reasoning: `Learned from correction of similar bug: "${correction.bug.summary}"`,
+              learned: true
+            });
+            seenTestIds.add(testId);
+          }
+        }
+      }
+
+      // Also check regular matches if we found a similar bug
+      for (const match of matches.reverse()) {
+        if (!match.bug || !match.match) continue;
+        
+        const matchKeywords = this.extractKeywords(
+          match.bug.summary + ' ' + (match.bug.description || '')
+        );
+
+        const matchScore = this.calculateKeywordMatch(bugKeywords, matchKeywords);
+        
+        if (matchScore > 0.5) {
+          const testId = match.match.test_id;
+          if (!seenTestIds.has(testId)) {
+            similarMatches.push({
+              test_id: testId,
+              case_id: match.match.case_id,
+              title: match.match.title,
+              confidence: 0.80 + (matchScore * 0.15),
+              reasoning: `Similar to previous bug: "${match.bug.summary}"`,
+              learned: true
+            });
+            seenTestIds.add(testId);
+          }
+        }
+      }
+
+      if (similarMatches.length > 0) {
+        logger.info(`Found ${similarMatches.length} learned matches from similar bugs`);
+      }
+
+      return similarMatches;
+    } catch (error) {
+      logger.error(`Failed to find similar matches: ${error.message}`);
+      return [];
     }
   }
 
@@ -191,6 +274,53 @@ class LearningService {
       const data = await fs.readFile(this.correctionsFile, 'utf8');
       return JSON.parse(data);
     } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get test cases linked to a specific bug
+   * @param {string} bugKey - JIRA bug key
+   * @returns {Promise<Array>} Array of test cases linked to this bug
+   */
+  async getTestCasesByBugKey(bugKey) {
+    try {
+      await this.initialize();
+      const matches = await this.loadMatches();
+      const corrections = await this.loadCorrections();
+      
+      // Collect test cases from both matches and corrections
+      const testCases = new Set();
+      
+      // Check corrections (these are the verified correct matches)
+      for (const correction of corrections) {
+        if (correction.bug.key === bugKey) {
+          testCases.add(JSON.stringify({
+            test_id: correction.correct_test_id,
+            case_id: correction.correct_case_id,
+            title: correction.correct_title,
+            run_id: correction.run_id
+          }));
+        }
+      }
+      
+      // Check matches (if no corrections found for this bug)
+      if (testCases.size === 0) {
+        for (const match of matches) {
+          if (match.bug && match.bug.key === bugKey && match.match) {
+            testCases.add(JSON.stringify({
+              test_id: match.match.test_id,
+              case_id: match.match.case_id,
+              title: match.match.title,
+              run_id: match.run_id
+            }));
+          }
+        }
+      }
+      
+      return Array.from(testCases).map(tc => JSON.parse(tc));
+    } catch (error) {
+      logger.error(`Failed to get test cases by bug key: ${error.message}`);
       return [];
     }
   }

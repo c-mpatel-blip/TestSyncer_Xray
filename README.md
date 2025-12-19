@@ -5,6 +5,11 @@ AI-powered automation service that intelligently links JIRA accessibility bugs t
 ## 🎯 Key Features
 
 - **AI-Powered Matching**: Uses OpenAI GPT-4o to match bugs to test cases with 95%+ confidence
+  - Prioritizes bug title keywords (508c criteria, accessibility attributes like aria-*, alt, role)
+  - Uses WCAG Issue Category field to filter and focus matching (optional)
+  - Matches bug title to test case title for alignment on accessibility requirements
+  - Validates with description details for accurate matching
+  - Assigns confidence scores based on title alignment and test relevance
 - **Smart Caching**: Caches test cases for 24 hours - reduces API calls and speeds up matching from ~2 minutes to 2 seconds
 - **Duplicate Detection**: Prevents redundant updates - checks if bug is already linked or test already has correct status
 - **Auto Run Discovery**: Automatically finds TestRail Run ID from parent tasks via custom fields or comments
@@ -220,22 +225,107 @@ Skipping update to avoid duplicates
 **Process:**
 1. Detects bug status change to "Queued merge to Release"
 2. Finds previously linked test case from JIRA comments
-3. **Duplicate check** - verifies test is not already marked as Passed
-4. Marks test as Passed in TestRail with empty defects field
-5. Adds confirmation comment to JIRA
+3. **Fetches ALL test results** for the test case (historical data)
+4. **Multi-bug validation** - checks if other bugs are linked across all results:
+   - Parses defects field from EVERY test result (not just latest)
+   - Builds complete list of all bugs ever linked to this test
+   - Excludes current bug being resolved
+   - Fetches status of each remaining bug from JIRA
+   - Checks if any are still "Open", "Reopened", or "Ready for Dev"
+   - **If YES:** Blocks Passed status and warns in JIRA comment
+   - **If NO:** Proceeds to mark as Passed
+5. **Duplicate check** - verifies test is not already marked as Passed
+6. Marks test as Passed in TestRail with empty defects field
+7. Adds confirmation comment to JIRA
 
-**Duplicate Prevention:**
-If test is already Passed, you'll see:
+**Example - All Bugs Resolved:**
 ```
-✅ TestRail Updated (Skipped)
-Test is already marked as Passed
+✅ TestRail Updated
+Status: Passed (Bug Fixed)
 Test ID: 31834450
-No update needed
+All linked bugs have been resolved.
 ```
 
-## 🧠 Learning System
+**Example - Other Bugs Still Open:**
+```
+⚠️ Cannot Mark Test as Passed
 
-### How It Works
+This test case has other bugs that are still open:
+- ROLL-1398: Ready for Dev - Missing aria-required attribute
+- ROLL-1399: Reopened - Form validation not announced
+
+All linked bugs must be resolved before marking test as Passed.
+(Checked 2 bug(s) across all test results)
+```
+
+**Why This Matters:**
+If multiple bugs are linked to the same test case across different test runs (e.g., "Login accessibility" test has 3 different bugs found over time), the test should only be marked as Passed when ALL bugs are resolved. 
+
+**Example Scenario:**
+- **March 2024**: Test run finds Bug A → Test marked Failed, defects: "BUG-100"
+- **April 2024**: Test run finds Bug B → Test marked Failed, defects: "BUG-100, BUG-200"  
+- **May 2024**: Bug A fixed → Service checks: Bug B still open → Blocks Passed
+- **June 2024**: Bug B fixed → Service checks: All bugs resolved → Marks Passed ✓
+
+This prevents:
+- ❌ Marking test as passed while bugs still exist
+- ❌ False positives in test results
+- ❌ Losing track of unresolved bugs
+- ✅ Ensures complete bug resolution before test passes
+- ✅ Maintains historical bug tracking integrity
+
+## 🧠 AI Matching & Learning System
+
+### How AI Matching Works
+
+The AI analyzes bug reports using a **title-first approach** with optional WCAG category filtering, optimized for 508c accessibility testing:
+
+**1. WCAG Category Filtering (Optional)**
+- If JIRA has WCAG Issue Category field configured, extracts the category value
+- Filters test cases to only those containing category keywords in title, steps, preconditions, or expected results
+- Example: Category "Keyboard Navigation" → filters to ~10-20 relevant tests instead of all 98
+- Dramatically speeds up matching (2 seconds → <1 second)
+- Improves accuracy by narrowing AI's search space
+
+**2. Bug Title Analysis (Primary)**
+- Extracts 508c criteria references (e.g., "508c | Form | Page Title")
+- Identifies accessibility attributes (aria-required, aria-label, alt, role, tabindex, etc.)
+- Recognizes component types (Form, Button, Link, Image, Table, etc.)
+- Understands accessibility requirements (keyboard navigation, screen reader, color contrast, etc.)
+
+**2. Test Case Title Matching**
+- Compares bug title keywords with test case titles
+- Prioritizes tests that validate the same accessibility requirement
+- High confidence (0.9-1.0) when titles clearly align on same criteria
+
+**3. Description Validation**
+- Uses bug description to confirm and refine the match
+- Validates that test steps would catch the specific failure
+- Adjusts confidence based on description details
+
+**Example Matching WITH WCAG Category:**
+```
+Bug Title: "508c | Form | aria-required missing on required fields"
+WCAG Category: "ARIA Attributes"
+         ↓
+AI Filters: 98 tests → 12 tests containing "ARIA" keywords
+         ↓
+AI Extracts: [508c, Form, aria-required, required fields]
+         ↓
+Matches Test: "C - Required fields are coded with the aria-required attribute"
+         ↓
+Confidence: 0.97 (Category match + Strong title alignment + relevant steps)
+Time: <1 second (vs 2 seconds without category filtering)
+```
+
+**Best Practices for Bug Titles:**
+- ✅ Include 508c criteria: "508c | Component | Issue"
+- ✅ Mention specific attributes: "Missing aria-label on submit button"
+- ✅ Use accessibility terms: "keyboard navigation", "screen reader", "focus indicator"
+- ✅ Reference standards: "WCAG 2.1", "Section 508", "ARIA 1.2"
+- ✅ Set WCAG Issue Category field for faster, more accurate matching
+
+### Learning System
 
 1. **Initial Match**: AI matches bug to test case with confidence score
 2. **User Correction**: If match is wrong, user provides correction

@@ -16,6 +16,45 @@ class TestRailService {
   }
 
   /**
+   * Get section details
+   * @param {string} sectionId - TestRail Section ID
+   * @returns {Promise<Object>} Section data
+   */
+  async getSection(sectionId) {
+    try {
+      logger.info(`Fetching TestRail section: ${sectionId}`);
+      const response = await axios.get(
+        `${this.baseUrl}/index.php?/api/v2/get_section/${sectionId}`,
+        { auth: this.auth }
+      );
+      return response.data;
+    } catch (error) {
+      logger.error(`Failed to fetch TestRail section ${sectionId}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get all sections in a project/suite
+   * @param {string} projectId - TestRail Project ID
+   * @param {string} suiteId - TestRail Suite ID (optional)
+   * @returns {Promise<Array>} Array of sections
+   */
+  async getSections(projectId, suiteId = null) {
+    try {
+      let url = `${this.baseUrl}/index.php?/api/v2/get_sections/${projectId}`;
+      if (suiteId) {
+        url += `&suite_id=${suiteId}`;
+      }
+      const response = await axios.get(url, { auth: this.auth });
+      return response.data.sections || response.data || [];
+    } catch (error) {
+      logger.error(`Failed to fetch sections: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
    * Get test run details
    * @param {string} runId - TestRail Run ID
    * @returns {Promise<Object>} Run data
@@ -73,6 +112,25 @@ class TestRailService {
   }
 
   /**
+   * Get test case details including custom fields
+   * @param {string} testId - TestRail Test ID
+   * @returns {Promise<Object>} Test details
+   */
+  async getTestDetails(testId) {
+    try {
+      logger.info(`Fetching test details: ${testId}`);
+      const response = await axios.get(
+        `${this.baseUrl}/index.php?/api/v2/get_test/${testId}`,
+        { auth: this.auth }
+      );
+      return response.data;
+    } catch (error) {
+      logger.error(`Failed to fetch test details ${testId}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Check if a bug is already linked to a test
    * @param {string} testId - TestRail Test ID
    * @param {string} bugId - Bug ID to check
@@ -98,6 +156,45 @@ class TestRailService {
     } catch (error) {
       logger.error(`Failed to check bug link: ${error.message}`);
       return false;
+    }
+  }
+
+  /**
+   * Find all test IDs that have a specific bug linked in their results
+   * This is the most reliable way to find linked tests, as it checks actual TestRail data
+   * @param {string} runId - TestRail Run ID
+   * @param {string} bugId - JIRA Bug ID to search for
+   * @returns {Promise<Array>} Array of test IDs that have this bug linked
+   */
+  async findTestsWithBug(runId, bugId) {
+    try {
+      logger.info(`Searching TestRail run ${runId} for tests with bug ${bugId}`);
+      
+      // Get all tests in the run
+      const tests = await this.getTests(runId);
+      const testIdsWithBug = [];
+      
+      // Check each test's results for the bug
+      for (const test of tests) {
+        const results = await this.getResults(test.id);
+        
+        for (const result of results) {
+          if (result.defects) {
+            const defects = result.defects.split(',').map(d => d.trim());
+            if (defects.includes(bugId)) {
+              testIdsWithBug.push(test.id);
+              logger.info(`Found bug ${bugId} in test ${test.id} (result ${result.id})`);
+              break; // No need to check more results for this test
+            }
+          }
+        }
+      }
+      
+      logger.info(`Found ${testIdsWithBug.length} test(s) with bug ${bugId}`);
+      return testIdsWithBug;
+    } catch (error) {
+      logger.error(`Failed to find tests with bug ${bugId}: ${error.message}`);
+      return [];
     }
   }
 
@@ -181,6 +278,13 @@ class TestRailService {
   }
 
   /**
+   * Update an existing test result
+   * @param {string} resultId - TestRail Result ID
+   * @param {string} defects - Updated defects/bug IDs (comma-separated)
+   * @param {string} comment - Optional comment
+   * @returns {Promise<Object>} Result data
+   */
+  /**
    * Find test case by title (fuzzy match)
    * @param {string} runId - TestRail Run ID
    * @param {string} title - Test case title to search for
@@ -239,6 +343,7 @@ class TestRailService {
             test_id: test.id,
             case_id: test.case_id,
             title: test.title,
+            section_id: caseDetails.section_id,
             custom_steps_separated: caseDetails.custom_steps_separated || [],
             custom_preconds: caseDetails.custom_preconds || '',
             custom_expected: caseDetails.custom_expected || '',
@@ -253,7 +358,8 @@ class TestRailService {
           testsWithDetails.push({
             test_id: test.id,
             case_id: test.case_id,
-            title: test.title
+            title: test.title,
+            section_id: null
           });
         }
       }

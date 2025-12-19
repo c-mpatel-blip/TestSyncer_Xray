@@ -222,11 +222,17 @@ class JiraService {
   }
 
   /**
-   * Extract plain text from JIRA comment body (ADF format)
-   * @param {Object} body - Comment body in ADF format
+   * Extract plain text from JIRA comment body (ADF format or plain string)
+   * @param {Object|string} body - Comment body in ADF format or plain string
    * @returns {string} Plain text
    */
   extractTextFromComment(body) {
+    // Handle plain string
+    if (typeof body === 'string') {
+      return body;
+    }
+    
+    // Handle ADF format
     if (!body || !body.content) return '';
     
     let text = '';
@@ -242,6 +248,158 @@ class JiraService {
     
     body.content.forEach(extractText);
     return text;
+  }
+
+  /**
+   * Extract plain text from JIRA description field (ADF format)
+   * Handles paragraphs, lists, and nested content
+   * @param {Object} description - Description in ADF format
+   * @returns {string} Plain text with line breaks preserved
+   */
+  extractTextFromDescription(description) {
+    if (!description) return '';
+    
+    // Handle plain string
+    if (typeof description === 'string') {
+      return description;
+    }
+    
+    // Handle ADF format
+    if (!description.content) return '';
+    
+    const lines = [];
+    
+    const extractNode = (node, level = 0) => {
+      switch (node.type) {
+        case 'paragraph':
+          let paragraphText = '';
+          if (node.content) {
+            node.content.forEach(child => {
+              paragraphText += extractTextOnly(child);
+            });
+          }
+          if (paragraphText.trim()) {
+            lines.push(paragraphText.trim());
+          }
+          break;
+          
+        case 'table':
+          // Extract table data - focus on "Actual" column if present
+          if (node.content) {
+            const tableData = extractTable(node);
+            if (tableData.length > 0) {
+              lines.push(...tableData);
+            }
+          }
+          break;
+          
+        case 'orderedList':
+        case 'bulletList':
+          if (node.content) {
+            node.content.forEach((item, index) => {
+              const prefix = node.type === 'orderedList' ? `${index + 1}. ` : '• ';
+              const itemText = extractListItem(item);
+              if (itemText) {
+                lines.push(prefix + itemText);
+              }
+            });
+          }
+          break;
+          
+        case 'heading':
+          let headingText = '';
+          if (node.content) {
+            node.content.forEach(child => {
+              headingText += extractTextOnly(child);
+            });
+          }
+          if (headingText.trim()) {
+            lines.push(headingText.trim());
+          }
+          break;
+          
+        default:
+          if (node.content) {
+            node.content.forEach(child => extractNode(child, level));
+          }
+      }
+    };
+    
+    const extractTable = (tableNode) => {
+      const rows = [];
+      let headerRow = null;
+      let actualColumnIndex = -1;
+      
+      if (!tableNode.content) return rows;
+      
+      // Process table rows
+      tableNode.content.forEach((row, rowIndex) => {
+        if (row.type !== 'tableRow' || !row.content) return;
+        
+        const cells = [];
+        row.content.forEach(cell => {
+          if ((cell.type === 'tableCell' || cell.type === 'tableHeader') && cell.content) {
+            const cellText = cell.content.map(extractTextOnly).join(' ').trim();
+            cells.push(cellText);
+          }
+        });
+        
+        // First row is usually header
+        if (rowIndex === 0) {
+          headerRow = cells;
+          // Find "Actual" column index (prioritize "Actual" over "No")
+          actualColumnIndex = cells.findIndex(header => 
+            header.toLowerCase().includes('actual')
+          );
+          
+          // If no "Actual" column found, try "No" column as fallback
+          if (actualColumnIndex === -1) {
+            actualColumnIndex = cells.findIndex(header => 
+              header.toLowerCase() === 'no'
+            );
+          }
+          
+          logger.info(`Table header: [${cells.join(', ')}] - Actual column index: ${actualColumnIndex}`);
+        } else {
+          // Extract only the Actual column if found, otherwise get all non-empty cells
+          if (actualColumnIndex >= 0 && cells[actualColumnIndex]) {
+            const actualText = cells[actualColumnIndex].trim();
+            if (actualText) {
+              rows.push(`${rowIndex}. ${actualText}`);
+            }
+          } else {
+            // Fallback: extract all non-empty cells
+            const nonEmptyCells = cells.filter(c => c.trim().length > 0);
+            if (nonEmptyCells.length > 0) {
+              rows.push(`${rowIndex}. ${nonEmptyCells.join(' - ')}`);
+            }
+          }
+        }
+      });
+      
+      return rows;
+    };
+    
+    const extractTextOnly = (node) => {
+      if (node.type === 'text') {
+        return node.text || '';
+      }
+      if (node.content) {
+        return node.content.map(extractTextOnly).join('');
+      }
+      return '';
+    };
+    
+    const extractListItem = (node) => {
+      if (node.type === 'listItem' && node.content) {
+        return node.content.map(child => extractTextOnly(child)).join(' ').trim();
+      }
+      return '';
+    };
+    
+    description.content.forEach(node => extractNode(node));
+    
+    return lines.join('\n');
   }
 
   /**

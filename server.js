@@ -226,10 +226,16 @@ async function processWebhook(webhookEvent, eventType) {
       
       if (statusChange) {
         const newStatus = statusChange.toString;
-        logger.info(`Status changed to: ${newStatus}`);
+        const fromStatus = statusChange.fromString;
+        logger.info(`Status changed from "${fromStatus}" to "${newStatus}"`);
 
-        // Bug Created workflow
-        if (newStatus === config.jira.statusReadyForDev) {
+        // Bug Re-opened workflow (moved back to Ready for Dev from QA In Progress)
+        if (newStatus === config.jira.statusReadyForDev && fromStatus === config.jira.statusQAInProgress) {
+          logger.info(`Triggering Bug Re-opened workflow for ${issueKey}`);
+          await workflowService.handleBugReopened(issueKey, fromStatus);
+        }
+        // Bug Created workflow (new bug moved to Ready for Dev)
+        else if (newStatus === config.jira.statusReadyForDev) {
           logger.info(`Triggering Bug Created workflow for ${issueKey}`);
           await workflowService.handleBugCreated(issueKey);
         }
@@ -244,15 +250,25 @@ async function processWebhook(webhookEvent, eventType) {
 
     // Handle comment added event
     if (eventType === 'comment_created' || eventType === 'jira:issue_updated') {
+      logger.info('Comment event detected, checking for comment object...');
       const comment = webhookEvent.comment;
-      if (comment) {
+      
+      if (!comment) {
+        logger.warn('No comment object found in webhook event');
+        logger.debug(`Webhook keys: ${Object.keys(webhookEvent).join(', ')}`);
+      } else {
+        logger.info('Comment object found, extracting text...');
+        logger.info(`Comment body structure: ${JSON.stringify(comment.body, null, 2)}`);
         const commentText = jiraService.extractTextFromComment(comment.body);
+        logger.info(`Comment text extracted: "${commentText}"`);
         
         // Check for correction format
         if (commentText.includes('CORRECT:')) {
           const issueKey = webhookEvent.issue.key;
           logger.info(`Detected correction comment on ${issueKey}`);
           await workflowService.handleCorrection(issueKey, commentText);
+        } else {
+          logger.info('Comment does not contain "CORRECT:" keyword');
         }
       }
     }
