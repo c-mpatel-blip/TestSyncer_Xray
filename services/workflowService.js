@@ -2,6 +2,7 @@ const jiraService = require('./jiraService');
 const testRailService = require('./testRailService');
 const aiService = require('./aiService');
 const learningService = require('./learningService');
+const playwrightService = require('./playwrightService');
 const logger = require('../logger');
 const config = require('../config');
 
@@ -697,19 +698,29 @@ ${config.server.dryRunMode ? '\n🔍 DRY RUN MODE - No actual TestRail update' :
       const allPreviousTestIds = await this.findAllLinkedTestIds(issueKey, runId);
       logger.info(`Found ${allPreviousTestIds.length} previously linked test(s)`);
       
-      let cleanupMessage = '';
+      let cleanupCount = 0;
       
-      // Note: TestRail API does not support updating existing results
-      // We can only add new results, not modify old ones
-      // So we just log the previous links for reference
+      // Use Playwright to remove bug from incorrect test results
       if (!addMode && allPreviousTestIds.length > 0) {
         const correctTestIds = correctTests.map(t => t.id.toString());
         const testsToCleanup = allPreviousTestIds.filter(id => !correctTestIds.includes(id));
         
         if (testsToCleanup.length > 0) {
-          logger.info(`Note: Bug was previously linked to ${testsToCleanup.length} incorrect test(s): ${testsToCleanup.join(', ')}`);
-          logger.info(`TestRail does not support updating results, so old links will remain in history`);
-          cleanupMessage = `\n⚠️ Note: Bug was previously linked to ${testsToCleanup.length} other test(s). Old results cannot be modified in TestRail.`;
+          logger.info(`Removing bug ${issueKey} from ${testsToCleanup.length} incorrect test(s) using Playwright`);
+          
+          for (const testId of testsToCleanup) {
+            try {
+              // Get test results to pass to playwright
+              const results = await testRailService.getResults(testId);
+              const updated = await playwrightService.removeBugFromTest(testId, issueKey, results);
+              if (updated > 0) {
+                cleanupCount += updated;
+                logger.info(`Cleaned up ${updated} result(s) from test ${testId}`);
+              }
+            } catch (error) {
+              logger.error(`Failed to clean up test ${testId}: ${error.message}`);
+            }
+          }
         }
       }
 
@@ -747,20 +758,14 @@ ${config.server.dryRunMode ? '\n🔍 DRY RUN MODE - No actual TestRail update' :
         `${idx + 1}. ${t.title} (C${t.case_id})${t.alreadyLinked ? ' - Already linked' : ' - Linked'}`
       ).join('\n');
 
+      const cleanupMsg = cleanupCount > 0 ? `\n\n✓ Removed from ${cleanupCount} incorrect result(s)` : '';
+
       await jiraService.addComment(
         issueKey,
         `✅ Correction Applied (${mode} Mode)
 
-Thank you! The AI has learned from this correction.
-
 Correct Test Case(s):
-${testsList}
-${cleanupMessage}
-
-Mode: ${mode === 'ADD' ? 'Added to existing matches' : 'Replaced all previous matches'}
-${linkedTests.length > 1 ? `\n🎯 Multi-test correction: ${linkedTests.length} test cases updated` : ''}
-
-These patterns will be used for future similar bugs.`
+${testsList}${cleanupMsg}`
       );
 
       logger.info(`Correction processed successfully for ${issueKey}: ${correctTests.length} test(s)`);

@@ -40,24 +40,21 @@ class AIService {
           };
         }
       } else {
-        // Multi-match mode - get multiple learned matches if available
+        // Multi-match mode - get learning context but always use AI for intelligent matching
         const learnedMatches = await learningService.findSimilarMatches(bugData);
         if (learnedMatches.length > 0) {
-          logger.info(`Found ${learnedMatches.length} learned matches from similar bugs`);
-          // Verify all learned matches exist in current test cases
+          logger.info(`Found ${learnedMatches.length} similar bugs in learning data - providing as context to AI`);
+          // Verify learned matches exist in current test cases
           const validLearnedMatches = learnedMatches.filter(lm => 
             testCases.some(tc => tc.test_id.toString() === lm.test_id.toString())
           );
           
-          if (validLearnedMatches.length === learnedMatches.length) {
-            // All learned matches are valid, use them
-            logger.info(`All ${validLearnedMatches.length} learned matches are valid, using learned results`);
-            return validLearnedMatches;
-          } else if (validLearnedMatches.length > 0) {
-            // Some learned matches are valid, but not all - still use AI for full analysis
-            logger.info(`Only ${validLearnedMatches.length}/${learnedMatches.length} learned matches are valid, using AI for complete analysis`);
+          if (validLearnedMatches.length > 0) {
+            logger.info(`${validLearnedMatches.length} learned matches are valid in this run - AI will consider them`);
+            // Store learned context to pass to AI (don't return early, let AI decide)
+            bugData.learnedContext = validLearnedMatches;
           } else {
-            logger.info(`No learned matches are valid in this run, using AI`);
+            logger.info(`No learned matches are valid in this run, AI will match from scratch`);
           }
         }
       }      // Prepare test cases for AI
@@ -226,6 +223,14 @@ class AIService {
     const wcagInfo = bugData.wcagCategory 
       ? `\nWCAG Issue Category: ${bugData.wcagCategory}\n**Note:** This bug is categorized as "${bugData.wcagCategory}". Prioritize test cases related to this category.`
       : '';
+    
+    // Add learned context if available
+    const learnedContext = bugData.learnedContext && bugData.learnedContext.length > 0
+      ? `\n\n**Learning Context (Previous Similar Bugs):**
+${bugData.learnedContext.map(lm => `- "${lm.reasoning}" → Test ID: ${lm.test_id}, Title: "${lm.title}"`).join('\n')}
+
+**Note:** These are suggestions from similar bugs, but YOU must verify they match the CURRENT bug's specific issue type. Do NOT blindly accept these - analyze if the current bug's issue type (e.g., heading-level vs heading-missing) matches these suggestions.`
+      : '';
       
     const instructionText = enableMultiMatch 
       ? 'I need you to match this accessibility bug to ALL relevant test cases. The bug may describe multiple distinct issues.'
@@ -236,7 +241,7 @@ ${instructionText}
 
 **Bug Details:**
 Title: ${bugData.summary}
-Description: ${bugData.description || 'No detailed description provided'}${wcagInfo}
+Description: ${bugData.description || 'No detailed description provided'}${wcagInfo}${learnedContext}
 
 **CRITICAL: PRIORITIZE BUG DESCRIPTION OVER TITLE**
 The bug DESCRIPTION contains the detailed issues - this is your PRIMARY source for matching. The TITLE provides general context and WCAG category only.
@@ -255,22 +260,29 @@ Expected Result: ${tc.expected}
 
 **Matching Instructions:**
 1. **Read bug DESCRIPTION first**: Identify each specific issue described (numbered items, distinct problems)
-2. **Group similar issues**: If multiple issues in the description would fail the SAME test case, group them together - only return that test case ONCE
-3. **Match issue TYPE correctly**: 
+2. **Understand the specific failure type**:
+   - "heading NOT PROVIDED" / "missing heading" / "not programmatically identified" → Test A (missing heading tags)
+   - "INCORRECT heading level" / "wrong level" / "h2 should be h3" → Test B (wrong heading level)
+   - These are DIFFERENT issues - do not match a level issue to a missing heading test!
+3. **Group similar issues**: If multiple issues in the description would fail the SAME test case, group them together - only return that test case ONCE
+4. **Match issue TYPE correctly**: 
    - Focus issues → ONLY focus management tests (keywords: focus, keyboard navigation, tab order)
    - Page title issues → ONLY page title tests
    - Language issues → ONLY language/lang attribute tests
    - Form issues → ONLY form/input tests
    - Image issues → ONLY alt text/image tests
+   - Heading LEVEL issues → Test B (programmatically identified heading levels)
+   - Heading MISSING issues → Test A (visually apparent headings not programmatically identified)
    - DO NOT match focus issues to page title tests or vice versa!
-4. **Match to SPECIFIC test cases**: Find test cases whose titles/steps directly test the SAME issue type
-5. **Use title for category context**: Extract WCAG criteria from title to validate matches are in correct category
-6. **Quote ALL grouped issues**: In reasoning, quote all specific issues from the description that this test case would catch
-7. **Assign confidence**: 
+   - DO NOT match heading level issues to missing heading tests!
+5. **Match to SPECIFIC test cases**: Find test cases whose titles/steps directly test the SAME issue type
+6. **Use title for category context**: Extract WCAG criteria from title to validate matches are in correct category
+7. **Quote ALL grouped issues**: In reasoning, quote all specific issues from the description that this test case would catch
+8. **Assign confidence**: 
    - 0.9-1.0: Test case title/steps directly test the EXACT SAME issue type from description
    - 0.7-0.89: Test would likely catch the issue and is the SAME issue type
-   - 0.5-0.69: Same category but different specific issue type
-   - Below 0.5: Wrong issue type (e.g., focus issue matched to page title test)
+   - 0.5-0.69: Same category but different specific issue type (AVOID THESE - wrong issue type)
+   - Below 0.5: Wrong issue type (e.g., focus issue matched to page title test, heading level matched to missing heading)
 
 **Response Format (JSON):**
 ${enableMultiMatch ? `{

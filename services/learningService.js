@@ -158,6 +158,7 @@ class LearningService {
 
       // Extract keywords from bug
       const bugKeywords = this.extractKeywords(bugData.summary + ' ' + (bugData.description || ''));
+      const bugIssueType = this.detectIssueType(bugData.summary + ' ' + (bugData.description || ''));
 
       const similarMatches = [];
       const seenTestIds = new Set();
@@ -167,6 +168,14 @@ class LearningService {
         const correctionKeywords = this.extractKeywords(
           correction.bug.summary + ' ' + (correction.bug.description || '')
         );
+        const correctionIssueType = this.detectIssueType(
+          correction.bug.summary + ' ' + (correction.bug.description || '')
+        );
+
+        // Issue types must match (especially important for heading-missing vs heading-level)
+        if (bugIssueType !== 'unknown' && correctionIssueType !== 'unknown' && bugIssueType !== correctionIssueType) {
+          continue; // Skip if issue types don't match
+        }
 
         const matchScore = this.calculateKeywordMatch(bugKeywords, correctionKeywords);
         
@@ -193,6 +202,14 @@ class LearningService {
         const matchKeywords = this.extractKeywords(
           match.bug.summary + ' ' + (match.bug.description || '')
         );
+        const matchIssueType = this.detectIssueType(
+          match.bug.summary + ' ' + (match.bug.description || '')
+        );
+
+        // Issue types must match
+        if (bugIssueType !== 'unknown' && matchIssueType !== 'unknown' && bugIssueType !== matchIssueType) {
+          continue; // Skip if issue types don't match
+        }
 
         const matchScore = this.calculateKeywordMatch(bugKeywords, matchKeywords);
         
@@ -237,6 +254,38 @@ class LearningService {
       .filter(word => word.length > 3 && !stopWords.has(word));
 
     return new Set(words);
+  }
+
+  /**
+   * Detect issue type from text
+   * @param {string} text - Text to analyze
+   * @returns {string} Issue type identifier
+   */
+  detectIssueType(text) {
+    const lower = text.toLowerCase();
+    
+    // Heading issues - distinguish between missing vs incorrect level
+    if (lower.includes('heading')) {
+      if (lower.match(/not\s+provided|missing|not\s+programmatically|not\s+identified|header\s+not\s+provided/)) {
+        return 'heading-missing';
+      }
+      if (lower.match(/incorrect\s+level|wrong\s+level|heading\s+level|h\d.*incorrect|level.*incorrect|h\d.*should.*h\d/)) {
+        return 'heading-level';
+      }
+      return 'heading-generic';
+    }
+    
+    // Other issue types
+    if (lower.includes('focus') || lower.includes('keyboard')) return 'focus';
+    if (lower.includes('page title') || lower.includes('title')) return 'title';
+    if (lower.includes('language') || lower.includes('lang')) return 'language';
+    if (lower.includes('form') || lower.includes('input') || lower.includes('label')) return 'form';
+    if (lower.includes('image') || lower.includes('alt')) return 'image';
+    if (lower.includes('table') || lower.includes('caption')) return 'table';
+    if (lower.includes('link')) return 'link';
+    if (lower.includes('color') || lower.includes('contrast')) return 'color';
+    
+    return 'unknown';
   }
 
   /**
