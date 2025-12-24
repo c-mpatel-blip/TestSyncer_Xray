@@ -1,7 +1,7 @@
 {
-  "name": "jira-testrail-integration",
-  "version": "1.0.0",
-  "description": "AI-powered JIRA-TestRail integration service with automatic test case matching and learning",
+  "name": "jira-testmanagement-integration",
+  "version": "2.0.0",
+  "description": "AI-powered JIRA integration with TestRail/Xray test management systems - automatic test case matching and learning",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,6 +12,8 @@
   "keywords": [
     "jira",
     "testrail",
+    "xray",
+    "test-management",
     "openai",
     "automation",
     "508c",

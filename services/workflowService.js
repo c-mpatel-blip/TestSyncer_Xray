@@ -1,5 +1,5 @@
 const jiraService = require('./jiraService');
-const testRailService = require('./testRailService');
+const testMgmt = require('./testManagementAdapter'); // Unified adapter for TestRail/Xray
 const aiService = require('./aiService');
 const learningService = require('./learningService');
 const playwrightService = require('./playwrightService');
@@ -39,25 +39,26 @@ class WorkflowService {
           description: jiraService.extractTextFromDescription(bug.fields.description)
         };
 
-        // Find Run ID
-        const runId = await jiraService.findRunId(issueKey);
-        if (!runId) {
-          const errorMsg = 'Could not find TestRail Run ID. Please add Run ID to parent task comments or custom field.';
+        // Find Run/Execution identifier
+        const runKey = await testMgmt.findRunOrExecutionKey(issueKey);
+        if (!runKey) {
+          const errorMsg = `Could not find ${testMgmt.getSystemName()} ${testMgmt.getIdentifierLabel()}. Please configure in parent task.`;
           await jiraService.addComment(issueKey, `❌ ${errorMsg}`);
           return { success: false, error: errorMsg };
         }
 
         // Get test cases and match
-        const testCases = await testRailService.getTestsWithDetails(runId);
+        const testCases = await testMgmt.getTestsWithDetails(runKey);
         if (testCases.length === 0) {
-          const errorMsg = `No test cases found in Run ${runId}`;
+          const errorMsg = `No test cases found in ${testMgmt.getIdentifierLabel()} ${runKey}`;
           await jiraService.addComment(issueKey, `❌ ${errorMsg}`);
           return { success: false, error: errorMsg };
         }
 
-        // Use smart section-based matching
-        const matchResult = await this.findMatchesWithSectionFiltering(bugData, testCases, runId);
-        if (!matchResult || matchResult.matches.length === 0) {
+        // Use AI matching for Xray
+        const matches = await aiService.matchBugToTestCase(bugData, testCases);
+        const matchesArray = Array.isArray(matches) ? matches : [matches];
+        if (!matchesArray || matchesArray.length === 0) {
           await jiraService.addComment(issueKey, `❌ Could not find matching test case for re-opened bug`);
           return { success: false, error: 'No matches found' };
         }
@@ -68,40 +69,24 @@ class WorkflowService {
         const updatedTests = [];
         const skippedTests = [];
         
-        for (const match of matchResult.matches) {
+        for (const match of matchesArray) {
           try {
-            // Check latest result and if bug is still linked
-            const testResults = await testRailService.getResults(match.test_id);
+            // Check if bug is already linked
+            const isLinked = await testMgmt.isBugAlreadyLinked(match.test_id, issueKey);
             
-            if (testResults && testResults.length > 0) {
-              const latestResult = testResults[0]; // Results ordered by newest first
-              
-              // Check if latest result is Failed
-              if (latestResult.status_id === 5) { // 5 = Failed
-                // Check if this bug is still linked in any result
-                const bugStillLinked = testResults.some(result => {
-                  if (result.defects) {
-                    const bugs = result.defects.split(',').map(d => d.trim());
-                    return bugs.includes(issueKey);
-                  }
-                  return false;
-                });
-                
-                if (bugStillLinked) {
-                  logger.info(`Test ${match.test_id} is already Failed with bug ${issueKey}, skipping`);
-                  skippedCount++;
-                  skippedTests.push(match);
-                  continue;
-                }
-              }
+            if (isLinked) {
+              logger.info(`Test ${match.test_id} is already linked to bug ${issueKey}, skipping`);
+              skippedCount++;
+              skippedTests.push(match);
+              continue;
             }
             
-            // Test is Passed or bug is not linked - re-fail it
+            // Test is not linked - re-fail it
             logger.info(`Re-failing matched test ${match.test_id}: ${match.title}`);
             
-            await testRailService.addResult(
+            await testMgmt.markAsFailed(
               match.test_id,
-              5, // Status: Failed
+              runKey,
               `Bug ${issueKey} re-opened and moved back to Ready for Dev`,
               issueKey
             );
@@ -117,16 +102,16 @@ class WorkflowService {
         let statusMessage = `🔄 Bug Re-opened - Test Cases Updated (AI Matched)\n\n`;
         
         if (updatedCount > 0) {
-          const testList = updatedTests.map(m => `• ${m.title} (Test ID: ${m.test_id}, Confidence: ${(m.confidence * 100).toFixed(1)}%)`).join('\n');
+          const testList = updatedTests.map(m => `• ${m.title} (${testMgmt.getTestIdentifierLabel()}: ${m.test_id}, Confidence: ${(m.confidence * 100).toFixed(1)}%)`).join('\n');
           statusMessage += `${updatedCount} test case(s) marked as Failed:\n${testList}\n\n`;
         }
         
         if (skippedCount > 0) {
-          const skippedList = skippedTests.map(m => `• ${m.title} (Test ID: ${m.test_id})`).join('\n');
+          const skippedList = skippedTests.map(m => `• ${m.title} (${testMgmt.getTestIdentifierLabel()}: ${m.test_id})`).join('\n');
           statusMessage += `${skippedCount} test case(s) already Failed with this bug:\n${skippedList}\n\n`;
         }
         
-        statusMessage += matchResult.autoMatched ? '🎯 Auto-matched based on section' : '🤖 AI matched';
+        statusMessage += '🤖 AI matched';
         
         await jiraService.addComment(issueKey, statusMessage);
 
@@ -144,41 +129,28 @@ class WorkflowService {
       
       for (const test of linkedTests) {
         try {
-          // Check latest result and if bug is still linked
-          const testResults = await testRailService.getResults(test.test_id);
+          // Check if bug is already linked
+          const isLinked = await testMgmt.isBugAlreadyLinked(test.test_id, issueKey);
           
-          if (testResults && testResults.length > 0) {
-            const latestResult = testResults[0]; // Results ordered by newest first
-            
-            // Check if latest result is Failed
-            if (latestResult.status_id === 5) { // 5 = Failed
-              // Check if this bug is still linked in any result
-              const bugStillLinked = testResults.some(result => {
-                if (result.defects) {
-                  const bugs = result.defects.split(',').map(d => d.trim());
-                  return bugs.includes(issueKey);
-                }
-                return false;
-              });
-              
-              if (bugStillLinked) {
-                logger.info(`Test ${test.test_id} is already Failed with bug ${issueKey}, skipping`);
-                skippedCount++;
-                skippedTests.push(test);
-                continue;
-              }
-            }
+          if (isLinked) {
+            logger.info(`Test ${test.test_id} is already linked to bug ${issueKey}, skipping`);
+            skippedCount++;
+            skippedTests.push(test);
+            continue;
           }
           
-          // Test is Passed or bug is not linked - re-fail it
+          // Test is not linked - re-fail it
           logger.info(`Re-failing test ${test.test_id}: ${test.title}`);
           
-          await testRailService.addResult(
-            test.test_id,
-            5, // Status: Failed
-            `Bug ${issueKey} re-opened and moved back to Ready for Dev`,
-            issueKey
-          );
+          // Get run key
+          const runKey = await testMgmt.findRunOrExecutionKey(issueKey);
+          if (runKey) {
+            await testMgmt.markAsFailed(
+              test.test_id,
+              runKey,
+              `Bug ${issueKey} re-opened and moved back to Ready for Dev`,
+              issueKey
+            );
           
           updatedCount++;
           updatedTests.push(test);
@@ -191,12 +163,12 @@ class WorkflowService {
       let statusMessage = `🔄 Bug Re-opened - Test Cases Updated\n\n`;
       
       if (updatedCount > 0) {
-        const testList = updatedTests.map(t => `• ${t.title} (Test ID: ${t.test_id})`).join('\n');
+        const testList = updatedTests.map(t => `• ${t.title} (${testMgmt.getTestIdentifierLabel()}: ${t.test_id})`).join('\n');
         statusMessage += `${updatedCount} test case(s) marked as Failed:\n${testList}\n\n`;
       }
       
       if (skippedCount > 0) {
-        const skippedList = skippedTests.map(t => `• ${t.title} (Test ID: ${t.test_id})`).join('\n');
+        const skippedList = skippedTests.map(t => `• ${t.title} (${testMgmt.getTestIdentifierLabel()}: ${t.test_id})`).join('\n');
         statusMessage += `${skippedCount} test case(s) already Failed with this bug:\n${skippedList}`;
       }
       
@@ -250,40 +222,40 @@ class WorkflowService {
       logger.info(`Bug: ${bugData.summary}`);
       logger.info(`Description: ${bugData.description.substring(0, 200)}...`);
 
-      // Step 2: Find Run ID
-      const runId = await jiraService.findRunId(issueKey);
-      if (!runId) {
-        const errorMsg = 'Could not find TestRail Run ID. Please add Run ID to parent task comments or custom field.';
+      // Step 2: Find Run or Execution identifier
+      const runKey = await testMgmt.findRunOrExecutionKey(issueKey);
+      if (!runKey) {
+        const errorMsg = `Could not find ${testMgmt.getSystemName()} ${testMgmt.getIdentifierLabel()}. Please configure in parent task.`;
         await jiraService.addComment(issueKey, `❌ ${errorMsg}`);
         return { success: false, error: errorMsg };
       }
 
-      logger.info(`Found Run ID: ${runId}`);
+      logger.info(`Found ${testMgmt.getIdentifierLabel()}: ${runKey}`);
 
-      // Step 3: Get test cases from TestRail
-      const testCases = await testRailService.getTestsWithDetails(runId);
+      // Step 3: Get test cases
+      const testCases = await testMgmt.getTestsWithDetails(runKey);
       if (testCases.length === 0) {
-        const errorMsg = `No test cases found in Run ${runId}`;
+        const errorMsg = `No test cases found in ${testMgmt.getIdentifierLabel()} ${runKey}`;
         await jiraService.addComment(issueKey, `❌ ${errorMsg}`);
         return { success: false, error: errorMsg };
       }
 
-      logger.info(`Found ${testCases.length} test cases in run`);
+      logger.info(`Found ${testCases.length} test cases`);
 
-      // Step 3.5: Use smart section-based matching
-      const matchResult = await this.findMatchesWithSectionFiltering(bugData, testCases, runId);
-      const matches = matchResult.matches;
+      // Step 4: Use AI matching
+      const matches = await aiService.matchBugToTestCase(bugData, testCases);
+      const matchesArray = Array.isArray(matches) ? matches : [matches];
       
-      logger.info(`Processing ${matches.length} test case match(es)`);
+      logger.info(`Processing ${matchesArray.length} test case match(es)`);
 
       // Step 5: Process each match
       const results = [];
-      for (const match of matches) {
+      for (const match of matchesArray) {
         // Check confidence
         const lowConfidence = !aiService.isConfidentMatch(match);
         
         // Check if bug is already linked
-        const alreadyLinked = await testRailService.isBugAlreadyLinked(match.test_id, issueKey);
+        const alreadyLinked = await testMgmt.isBugAlreadyLinked(match.test_id, issueKey);
         
         let testResult;
         if (alreadyLinked) {
@@ -295,11 +267,12 @@ class WorkflowService {
             match: match
           };
         } else {
-          // Mark test as Failed in TestRail
-          testResult = await testRailService.markAsFailed(
+          // Mark test as Failed
+          testResult = await testMgmt.markAsFailed(
             match.test_id,
+            runKey,
             `Bug filed: ${issueKey} - ${bugData.summary}`,
-            issueKey  // Add bug ID to defects field for JIRA linking
+            issueKey
           );
           testResult.match = match;
           testResult.lowConfidence = lowConfidence;
@@ -309,9 +282,9 @@ class WorkflowService {
       }
 
       // Step 6: Add comment(s) to JIRA
-      if (matches.length === 1) {
+      if (matchesArray.length === 1) {
         // Single match - use original format
-        const match = matches[0];
+        const match = matchesArray[0];
         const result = results[0];
         const lowConfidence = !aiService.isConfidentMatch(match);
         
@@ -319,7 +292,7 @@ class WorkflowService {
           const comment = `⚠️ AI Match (Low Confidence: ${(match.confidence * 100).toFixed(1)}%)
         
 Matched to: ${match.title}
-Test ID: ${match.test_id}
+${testMgmt.getTestIdentifierLabel()}: ${match.test_id}
 Reasoning: ${match.reasoning}
 
 ⚠️ Please verify this match is correct. If incorrect, reply with:
@@ -329,19 +302,18 @@ CORRECT: <test_id> - <test title>`;
           logger.warn(`Low confidence match: ${match.confidence}`);
         }
         
-        const successComment = `✅ TestRail Updated
+        const successComment = `✅ ${testMgmt.getSystemName()} Updated
 
 Test Case: ${match.title}
 Status: ${result.skipped ? 'Already Linked' : 'Failed'}
-Run: ${runId}
-Test ID: ${match.test_id}
-${match.autoMatched ? '🎯 Auto-matched' : `AI Confidence: ${(match.confidence * 100).toFixed(1)}%`}
+${testMgmt.getIdentifierLabel()}: ${runKey}
+${testMgmt.getTestIdentifierLabel()}: ${match.test_id}
+AI Confidence: ${(match.confidence * 100).toFixed(1)}%
 Reasoning: ${match.reasoning}
 
-${match.autoMatched ? '✨ Automatically matched - only test case in matching section' : ''}
 ${match.learned ? '🧠 Match based on previous learning' : ''}
 ${result.skipped ? '⚠️ Bug was already linked to this test case' : ''}
-${config.server.dryRunMode ? '🔍 DRY RUN MODE - No actual TestRail update' : ''}`;
+${config.server.dryRunMode ? '🔍 DRY RUN MODE - No actual update' : ''}`;
 
         await jiraService.addComment(issueKey, successComment);
       } else {
@@ -349,34 +321,34 @@ ${config.server.dryRunMode ? '🔍 DRY RUN MODE - No actual TestRail update' : '
         const linkedCount = results.filter(r => !r.skipped).length;
         const skippedCount = results.filter(r => r.skipped).length;
         
-        const matchesText = matches.map((match, idx) => {
+        const matchesText = matchesArray.map((match, idx) => {
           const result = results[idx];
           const status = result.skipped ? '⚠️ Already Linked' : '✅ Failed';
           return `${idx + 1}. ${status} - ${match.title}
-   Test ID: ${match.test_id} | Confidence: ${(match.confidence * 100).toFixed(1)}%
+   ${testMgmt.getTestIdentifierLabel()}: ${match.test_id} | Confidence: ${(match.confidence * 100).toFixed(1)}%
    Issue: ${match.reasoning}`;
         }).join('\n\n');
         
-        const comment = `✅ TestRail Updated - Multiple Matches
+        const comment = `✅ ${testMgmt.getSystemName()} Updated - Multiple Matches
 
-This bug contains multiple accessibility issues. Linked to ${matches.length} test case(s):
+This bug contains multiple accessibility issues. Linked to ${matchesArray.length} test case(s):
 
 ${matchesText}
 
-Run: ${runId}
+${testMgmt.getIdentifierLabel()}: ${runKey}
 Tests Linked: ${linkedCount} | Already Linked: ${skippedCount}
 ${config.openai.enableMultiMatch ? '\n🎯 Multi-match mode enabled' : ''}
-${config.server.dryRunMode ? '\n🔍 DRY RUN MODE - No actual TestRail update' : ''}`;
+${config.server.dryRunMode ? '\n🔍 DRY RUN MODE - No actual update' : ''}`;
 
         await jiraService.addComment(issueKey, comment);
       }
 
-      logger.info(`Bug Created workflow completed successfully for ${issueKey} with ${matches.length} match(es)`);
+      logger.info(`Bug Created workflow completed successfully for ${issueKey} with ${matchesArray.length} match(es)`);
 
       return {
         success: true,
-        runId,
-        matches: matches,
+        runKey,
+        matches: matchesArray,
         results: results
       };
     } catch (error) {
@@ -396,19 +368,18 @@ ${config.server.dryRunMode ? '\n🔍 DRY RUN MODE - No actual TestRail update' :
     try {
       logger.info(`Starting Bug Resolved workflow for ${issueKey}`);
 
-      // Step 1: Find Run ID
-      const runId = await jiraService.findRunId(issueKey);
-      if (!runId) {
-        const errorMsg = 'Could not find TestRail Run ID';
+      // Step 1: Find Run/Execution identifier
+      const runKey = await testMgmt.findRunOrExecutionKey(issueKey);
+      if (!runKey) {
+        const errorMsg = `Could not find ${testMgmt.getSystemName()} ${testMgmt.getIdentifierLabel()}`;
         await jiraService.addComment(issueKey, `❌ ${errorMsg}`);
         return { success: false, error: errorMsg };
       }
 
-      // Step 2: Find all test cases that have this bug linked in TestRail
-      // This is more reliable than parsing JIRA comments
-      const testIds = await testRailService.findTestsWithBug(runId, issueKey);
+      // Step 2: Find all test cases that have this bug linked
+      const testIds = await testMgmt.findTestsWithBug(runKey, issueKey);
       if (testIds.length === 0) {
-        const errorMsg = 'Could not find any test cases with this bug linked in TestRail. Was this bug processed through Bug Created workflow?';
+        const errorMsg = `Could not find any test cases with this bug linked in ${testMgmt.getSystemName()}. Was this bug processed through Bug Created workflow?`;
         await jiraService.addComment(issueKey, `❌ ${errorMsg}`);
         return { success: false, error: errorMsg };
       }
@@ -423,6 +394,7 @@ ${config.server.dryRunMode ? '\n🔍 DRY RUN MODE - No actual TestRail update' :
       for (const testId of testIds) {
         const result = await this.markTestAsPassedIntelligently(
           testId,
+          runKey,
           issueKey,
           `Bug resolved: ${issueKey} - ${bug.fields.summary}`
         );
@@ -438,7 +410,7 @@ ${config.server.dryRunMode ? '\n🔍 DRY RUN MODE - No actual TestRail update' :
         // Single test case
         const result = results[0].result;
         if (result.skipped) {
-          statusMessage = `✅ TestRail Already Passed\n\nTest ${testIds[0]} is already marked as Passed, no update needed.`;
+          statusMessage = `✅ ${testMgmt.getSystemName()} Already Passed\n\nTest ${testIds[0]} is already marked as Passed, no update needed.`;
         } else if (result.status === 'Failed') {
           // Get bug details for better comment
           const bugDetails = [];

@@ -3,7 +3,7 @@ const workflowService = require('./services/workflowService');
 const learningService = require('./services/learningService');
 const cacheService = require('./services/cacheService');
 const jiraService = require('./services/jiraService');
-const testRailService = require('./services/testRailService');
+const testMgmt = require('./services/testManagementAdapter');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -14,7 +14,8 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    service: 'JIRA-TestRail Integration',
+    service: `JIRA-${testMgmt.getSystemName()} Integration`,
+    testManagementSystem: testMgmt.getSystemName(),
     dryRunMode: config.server.dryRunMode
   });
 });

@@ -1,6 +1,10 @@
 require('dotenv').config();
 
 module.exports = {
+  // Test Management System Selection
+  testManagement: {
+    system: process.env.TEST_MANAGEMENT_SYSTEM || 'testrail', // 'testrail' or 'xray'
+  },
   jira: {
     baseUrl: process.env.JIRA_BASE_URL,
     email: process.env.JIRA_EMAIL,
@@ -23,6 +27,16 @@ module.exports = {
     statusPassed: parseInt(process.env.TESTRAIL_STATUS_PASSED) || 1,
     statusFailed: parseInt(process.env.TESTRAIL_STATUS_FAILED) || 5,
     statusRetest: parseInt(process.env.TESTRAIL_STATUS_RETEST) || 4
+  },
+  xray: {
+    baseUrl: process.env.XRAY_BASE_URL || process.env.JIRA_BASE_URL,
+    email: process.env.XRAY_EMAIL || process.env.JIRA_EMAIL,
+    apiToken: process.env.XRAY_API_TOKEN || process.env.JIRA_API_TOKEN,
+    rateLimitMs: parseInt(process.env.XRAY_RATE_LIMIT_MS) || 250,
+    executionKeyField: process.env.XRAY_EXECUTION_KEY_FIELD, // Custom field for Test Execution key
+    statusPass: process.env.XRAY_STATUS_PASS || 'PASS',
+    statusFail: process.env.XRAY_STATUS_FAIL || 'FAIL',
+    statusTodo: process.env.XRAY_STATUS_TODO || 'TODO'
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
