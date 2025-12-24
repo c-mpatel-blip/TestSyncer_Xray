@@ -151,6 +151,7 @@ class WorkflowService {
               `Bug ${issueKey} re-opened and moved back to Ready for Dev`,
               issueKey
             );
+          }
           
           updatedCount++;
           updatedTests.push(test);
